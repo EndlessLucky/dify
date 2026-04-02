@@ -6,7 +6,7 @@ import secrets
 import time
 import uuid
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
 import sqlalchemy as sa
@@ -4021,6 +4021,36 @@ class DatasetCollectionBindingService:
 
 
 class DatasetPermissionService:
+    @staticmethod
+    def _normalize_partial_member_list(user_list: list[Any]) -> list[str]:
+        """
+        Normalize partial member list payload.
+
+        Historically, some callers send a list of strings (account IDs), while others send
+        a list of objects like {"user_id": "..."}.
+        """
+        normalized: list[str] = []
+        for item in user_list:
+            if isinstance(item, str):
+                normalized.append(item)
+                continue
+
+            if isinstance(item, Mapping):
+                # Be lenient about the exact key to avoid breaking clients.
+                if "user_id" in item:
+                    normalized.append(str(item["user_id"]))
+                    continue
+                if "account_id" in item:
+                    normalized.append(str(item["account_id"]))
+                    continue
+                if "id" in item:
+                    normalized.append(str(item["id"]))
+                    continue
+
+            raise ValueError("Invalid partial member list item format.")
+
+        return normalized
+
     @classmethod
     def get_dataset_partial_member_list(cls, dataset_id):
         user_list_query = db.session.scalars(
@@ -4035,14 +4065,11 @@ class DatasetPermissionService:
     def update_partial_member_list(cls, tenant_id, dataset_id, user_list):
         try:
             db.session.query(DatasetPermission).where(DatasetPermission.dataset_id == dataset_id).delete()
-            permissions = []
-            for user in user_list:
-                permission = DatasetPermission(
-                    tenant_id=tenant_id,
-                    dataset_id=dataset_id,
-                    account_id=user["user_id"],
-                )
-                permissions.append(permission)
+            normalized_user_ids = cls._normalize_partial_member_list(user_list)
+            permissions = [
+                DatasetPermission(tenant_id=tenant_id, dataset_id=dataset_id, account_id=user_id)
+                for user_id in normalized_user_ids
+            ]
 
             db.session.add_all(permissions)
             db.session.commit()
@@ -4063,7 +4090,7 @@ class DatasetPermissionService:
                 raise ValueError("Partial member list is required when setting to partial members.")
 
             local_member_list = cls.get_dataset_partial_member_list(dataset.id)
-            request_member_list = [user["user_id"] for user in requested_partial_member_list]
+            request_member_list = cls._normalize_partial_member_list(requested_partial_member_list)
             if set(local_member_list) != set(request_member_list):
                 raise ValueError("Dataset operators cannot change the dataset permissions.")
 
